@@ -27,13 +27,15 @@ struct Marker{
      unsigned long uncnows_files;
 };
 
+void check_csum_supblock_and_grdesck(ext2_filsys *fs);
+
 void check_gr_desc_and_inodes_and_data(ext2_filsys *fs);
 
 void check_blocks(ext2_filsys fs, ext2_ino_t dir);
 
 int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private);
 
-errcode_t check_data_blocks (ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode);
+errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block);
 
 int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private);
 
@@ -79,7 +81,7 @@ int main(int argc, char **argv){
 
     check_gr_desc_and_inodes_and_data(&fs);
 
-
+    check_csum_supblock_and_grdesck(&fs);
 
 
     print_filesystem_info(&fs); 
@@ -160,6 +162,7 @@ void check_blocks(ext2_filsys fs, ext2_ino_t dir) {
     struct ext2_inode inode;
     int flags = 0;
     PrivateData private_data = {fs, NULL};
+    int found_bad_block = 0;
     while (ext2fs_dir_iterate(fs, dir, flags, NULL, process_dir_entry, &private_data) == 0) {
         if (private_data.dirent->inode == 0)
             continue;
@@ -183,13 +186,14 @@ void check_blocks(ext2_filsys fs, ext2_ino_t dir) {
         // Проверяем блоки данных inode
         if(S_ISDIR(inode.i_mode) || S_ISREG(inode.i_mode))
         {
-            err = check_data_blocks(fs, inode_num, &inode);
+            err = check_data_blocks(fs, inode_num, &inode, &found_bad_block);
             if (err) {
                 fprintf(stderr, "Ошибка проверки блоков данных inode %u - файла %s: %s\n", inode_num, private_data.dirent->name, error_message(err));
                 continue;
             }
         }
     }
+    printf("Обнаруженыe битые блоки %d\n", found_bad_block);
 }
 
 int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private) {
@@ -199,16 +203,16 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
     PrivateData *private_data = (PrivateData *)private;
     ext2_filsys fs = private_data->fs;
     private_data->dirent = dirent;
-
+    
     err = ext2fs_read_inode(fs, dirent->inode, &inode);
     //printf("Directory entry name: %.*s\n", dirent->name_len, dirent->name);
     if (!S_ISCHR(inode.i_mode) && !S_ISBLK(inode.i_mode) && !S_ISLNK(inode.i_mode)) //S_ISCHR   S_ISBLK  S_ISLNK
     {   
          // Проверяем, является ли inode действующим в inode bitmap
         if (!ext2fs_test_inode_bitmap(fs->inode_map, dirent->inode)) {
-            printf("Файловый inode не является действительным: %u\n", dirent->inode);
+            printf("Файловый inode не является действительным: %u\nфайл: %s", dirent->inode, dirent->name);
         }
-         
+        
         if(ext2_inode_has_valid_blocks (&inode) == 0){
             printf("Блоки данных файла не действительны\nфайл: %.*s\n", dirent->name_len, dirent->name);
         }
@@ -217,27 +221,16 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
 }
 
 
-errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode){
+errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block){
     
     errcode_t err;
-    int found_bad_block = 0;
+    //int found_bad_block = 0;
      unsigned long block_offset = 0;
     unsigned long block_checksum;
     // Итерируемся по блокам данных inode
-    err = ext2fs_block_iterate(fs, inode_num, BLOCK_FLAG_DATA_ONLY, NULL, process_block, &found_bad_block);
+    err = ext2fs_block_iterate(fs, inode_num, BLOCK_FLAG_DATA_ONLY, NULL, process_block, found_bad_block);
     if (err)
         return err;
-
-    for (blk_t blocknr = 0; blocknr < inode->i_blocks; blocknr++) {
-        block_checksum = calculate_block_checksum(fs->device_name, block_offset, BLOCK_SIZE);
-        //printf("Контрольная сумма блока данных inode %d, блок %u: %lx\n", inode_num, blocknr, block_checksum);
-        if(block_checksum ! = ){ //???
-            found_bad_block
-        }
-        block_offset += BLOCK_SIZE;
-    }
-
-    printf("Обнаруженыe битые блоки данных inode %d\n", inode_num);
 
     return 0;
 
@@ -247,12 +240,11 @@ int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
     int *found_bad_block = (int *)private;
     errcode_t err;
 
-    // Проверяем, является ли блок битым
+    // Проверяем, является ли блок битым    
     if (ext2fs_test_block_bitmap(fs->block_map, *blocknr) == 0) {
         //printf("Битый блок: %u\n", *blocknr);
-        *found_bad_block++;
+        (*found_bad_block)++;
     }
-
     return 0;
 }
 
@@ -299,4 +291,8 @@ unsigned long calculate_block_checksum(const char *filename, off_t block_offset,
     fclose(input_file);
 
     return crc;
+}
+
+void check_csum_supblock_and_grdesck(ext2_filsys *fs){
+    //
 }
