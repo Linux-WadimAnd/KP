@@ -27,17 +27,17 @@ struct Marker{
      unsigned long uncnows_files;
 };
 
-void check_csum_supblock_and_grdesck(ext2_filsys *fs);
+void check_csum_supblock_and_grdesc(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
 
-void check_gr_desc_and_inodes_and_data(ext2_filsys *fs);
+void check_gr_desc_and_inodes_and_data(ext2_filsys *fs);//ПРОВЕРКА СТРУКТУРЫ ДЕСКРИПТОРОВ ГРУПП 
 
-void check_blocks(ext2_filsys fs, ext2_ino_t dir);
+void check_blocks(ext2_filsys fs, ext2_ino_t dir);// ПРОВЕРКА ТОГО, ЧТО СУЩЕСВТУЮЩИЕ ФАЙЛЫ ПОМЕЧЕНЫ КАК ИСПОЛЬЗУЕМЫЕ В inode- и block bitmap 
 
-int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private);
+int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private); //ФУНКЦИЯ КОТОРАЯ ВЫЗЫВАЕТСЯ КОГДА ИТЕРИРУЕМСЯ ПО КАТАЛОГУ(ПРОВЕРКА ЧТО Блоки данных файла действительны и Файловый inode не является действительным)
 
-errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block);
+errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block); //ТУТ МЫ Итерируемся по блокам данных inode 
 
-int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private);
+int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private); // сверяемс блоки данных файла с block_bitmap
 
 unsigned long calculate_block_checksum(const char *filename, off_t block_offset, size_t block_size);
 
@@ -81,7 +81,7 @@ int main(int argc, char **argv){
 
     check_gr_desc_and_inodes_and_data(&fs);
 
-    check_csum_supblock_and_grdesck(&fs);
+    check_csum_supblock_and_grdesc(&fs);
 
 
     print_filesystem_info(&fs); 
@@ -293,6 +293,6 @@ unsigned long calculate_block_checksum(const char *filename, off_t block_offset,
     return crc;
 }
 
-void check_csum_supblock_and_grdesck(ext2_filsys *fs){
+void check_csum_supblock_and_grdesc(ext2_filsys *fs){
     //
 }
