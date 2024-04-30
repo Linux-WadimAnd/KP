@@ -5,6 +5,7 @@
 #include <locale.h>
 #include <sys/stat.h>  // Для макросов S_ISREG, S_ISDIR, S_ISLNK и т.д.
 #include <zlib.h>
+#include <fcntl.h>
 
 //#define BLOCK_SIZE 4096 
 
@@ -27,7 +28,9 @@ struct Marker{
      unsigned long uncnows_files;
 };
 
-void check_csum_supblock_and_grdesc(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
+int read_block(ext2_filsys *fs, blk_t block_num, char* buf); //вернёт 0 если всё ок
+
+void check_csum_fs(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
 
 void check_gr_desc_and_inodes_and_data(ext2_filsys *fs);//ПРОВЕРКА СТРУКТУРЫ ДЕСКРИПТОРОВ ГРУПП 
 
@@ -38,8 +41,6 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
 errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block); //ТУТ МЫ Итерируемся по блокам данных inode 
 
 int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private); // сверяемс блоки данных файла с block_bitmap
-
-unsigned long calculate_block_checksum(const char *filename, off_t block_offset, size_t block_size);
 
 void print_filesystem_info(ext2_filsys *fs); //вывод информации про ФС
 
@@ -81,8 +82,7 @@ int main(int argc, char **argv){
 
     check_gr_desc_and_inodes_and_data(&fs);
 
-    check_csum_supblock_and_grdesc(&fs);
-
+    check_csum_fs(&fs);
 
     print_filesystem_info(&fs); 
 
@@ -91,6 +91,8 @@ int main(int argc, char **argv){
         fprintf(stderr, "Ошибка закрытия файловой системы: %s\n", error_message(err));
         exit(EXIT_FAILURE);
     }
+    
+    return 0;
 }
 
 void print_filesystem_info(ext2_filsys *fs){
@@ -248,51 +250,93 @@ int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
     return 0;
 }
 
-unsigned long calculate_block_checksum(const char *filename, off_t block_offset, size_t block_size) { //block_offset: Смещение блока данных от начала файла.
-    FILE *input_file;
-    unsigned long crc = crc32(0L, Z_NULL, 0); // Инициализация переменной crc значением 0.
-    unsigned char *buffer;               //- Объявление указателя на буфер для чтения данных из файла.
-    size_t bytes_read;                   //Объявление переменной для хранения количества байт, прочитанных из файла.
-
-    input_file = fopen(filename, "r");
-    if (input_file == NULL) {
-        fprintf(stderr, "Error opening file %s: %s\n", filename, strerror(errno));
-        return crc;
+void check_csum_fs(ext2_filsys *fs){
+    errcode_t err;
+    err = ext2fs_verify_csum_type(*fs, (*fs)->super);
+    if(err){
+        printf("Тип контрольной суммы не поддерживается файловой системой\n");
+        return;
     }
 
-    if (fseeko(input_file, block_offset, SEEK_SET) == -1) {      //fseeko() используется вместо fseek() для работы с большими файлами
-        fprintf(stderr, "Error seeking to block offset: %s\n", strerror(errno));
-        fclose(input_file);
-        return crc;
+    err = ext2fs_superblock_csum_verify((*fs), (*fs)->super); // Проверяет контрольную сумму суперблока.
+    if(err){
+        printf("Контрольная сумма суперблока не совпала с вычисленной контрольной суммой\n");
+        //заменяем на резервную копию из другой группы блоков 
     }
 
-    buffer = (unsigned char *)malloc(block_size);
-    if (buffer == NULL) {
-        fprintf(stderr, "Error allocating memory for buffer\n");
-        fclose(input_file);
-        return crc;
-    }
-
-    while ((bytes_read = fread(buffer, 1, block_size, input_file)) > 0) {
-        crc = crc32(crc, buffer, (uInt)bytes_read);
-        if (bytes_read < block_size) {
-            if (feof(input_file)) {
-                // Reached end of file
-                break;
-            } else if (ferror(input_file)) {
-                // Read error
-                fprintf(stderr, "Error reading file: %s\n", strerror(errno));
-                break;
-            }
+    for(dgrp_t num_group = 0; num_group < (*fs)->group_desc_count; num_group++){
+        err = ext2fs_group_desc_csum_verify((*fs), num_group);
+        if(err){
+            printf("Контрольная сумма группы блоков №%d не совпала с вычисленной\n", num_group); 
+            //заменяем на копию из другой группы блоков
         }
+
+        struct ext2_group_desc *group_desc = ext2fs_group_desc((*fs), (*fs)->group_desc, num_group); //возвращает указатель на структуру ext2_group_desc, которая содержит информацию о группе блоков group.
+        __u32 block_bitmap_block = (*group_desc).bg_block_bitmap;
+        __u32 inode_bitmap_block = (*group_desc).bg_inode_bitmap;
+
+        char* bitmap_buffer = NULL;
+        bitmap_buffer = malloc(BLOCK_SIZE);
+        
+        if(read_block(fs, block_bitmap_block, bitmap_buffer)){
+            printf("Ошибка считывания растрового изображения карты блоков группы блоков №%d\n", num_group);
+            continue;
+        }
+
+        err = ext2fs_block_bitmap_csum_verify((*fs), num_group, bitmap_buffer, BLOCK_SIZE);
+        if(err){
+            printf("Контрольная сумма карты блоков группы блоков №%d не совпало с вычисленной\n", num_group);
+            //continue;
+            //как-то обработать - возможно добавить в bad blocks либо просто пометить
+        }
+
+        if(read_block(fs, inode_bitmap_block, bitmap_buffer)){
+            printf("Ошибка считывания растрового изображения карты блоков группы блоков №%d\n", num_group);
+            continue;
+        }
+
+        err = ext2fs_inode_bitmap_csum_verify((*fs), num_group, inode_bitmap_block, BLOCK_SIZE);
+        if(err){
+            printf("Контрольная сумма карты inodes группы блоков №%d не совпало с вычисленной\n", num_group);
+            //continue;
+            //как-то обработать - возможно добавить в bad blocks либо просто пометить
+        }
+
+        free(bitmap_buffer);
     }
 
-    free(buffer);
-    fclose(input_file);
-
-    return crc;
 }
 
-void check_csum_supblock_and_grdesc(ext2_filsys *fs){
-    //
+int read_block(ext2_filsys *fs, __u32 block_num, char* buf){
+    int fd;
+    ssize_t bytes_read;
+
+    fd = open((*fs)->device_name, O_RDONLY);
+    if (fd < 0) {
+        printf("Failed to open device\n");
+        return -1;
+    }
+
+    if (block_num < 0 || block_num > (*fs)->super->s_blocks_count) {
+        printf("Invalid block number\n");
+        return -1;
+    }
+
+    off_t offset = block_num * BLOCK_SIZE;
+
+    if (lseek(fd, offset, SEEK_SET) == -1) {
+        printf("Failed to seek to block\n");
+        close(fd);
+        return -1;
+    }
+
+    bytes_read = read(fd, buf, BLOCK_SIZE);
+    if (bytes_read != BLOCK_SIZE) {
+        printf("Failed to read block\n");
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
 }
