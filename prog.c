@@ -1,13 +1,13 @@
 #include <stdio.h>
+#include <unistd.h>  // Для функций lseek, close
 #include <ext2fs/ext2_fs.h>
 #include <ext2fs/ext2fs.h>
 #include <stdlib.h>
 #include <locale.h>
 #include <sys/stat.h>  // Для макросов S_ISREG, S_ISDIR, S_ISLNK и т.д.
-#include <zlib.h>
+//#include <zlib.h>
 #include <fcntl.h>
-
-//#define BLOCK_SIZE 4096 
+#include <sys/types.h>
 
 typedef struct {
     ext2_filsys fs;
@@ -28,6 +28,7 @@ struct Marker{
      unsigned long uncnows_files;
 };
 
+
 int read_block(ext2_filsys *fs, blk_t block_num, char* buf); //вернёт 0 если всё ок
 
 void check_csum_fs(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
@@ -42,51 +43,53 @@ errcode_t check_data_blocks(ext2_filsys fs, ext2_ino_t inode_num, struct ext2_in
 
 int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private); // сверяемс блоки данных файла с block_bitmap
 
+
+//................ПОКА ТОЛЬКО ИДЕЯ.........................//
+
+//void check_sum_entry_dir();
+
+void repair_bitmaps(ext2_filsys* fs); // НЕ РЕАЛИЗОВАННАЯ ИДЕЯ. МОЖНО ПОЧИНИТЬ ПРОХОДЯСЬ ПО ВСЕМ inodes и их i_mode и i_dtame и сверяясь по функции ext2fs_test_inode_bitmap
+
+
+//................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ..................//
 void print_filesystem_info(ext2_filsys *fs); //вывод информации про ФС
 
-void count_file_types(struct Marker *cnt_types, ext2_filsys *fs);
+void count_file_types(struct Marker *cnt_types, ext2_filsys fs);
+
+void open_fs(ext2_filsys* fs, char*);
+
+void read_bitmaps(ext2_filsys* fs);
+
+void write_bitmaps(ext2_filsys* fs);
+
+
 
 int main(int argc, char **argv){
     setlocale(LC_ALL, "Rus");
-    ext2_filsys fs; //дескриптор файловой системы | объявляешь переменную ext2_filsys fs - создаешь указатель на структуру struct struct_ext2_filsys
+    ext2_filsys fs = NULL; //дескриптор файловой системы | объявляешь переменную ext2_filsys fs - создаешь указатель на структуру struct struct_ext2_filsys
+    printf("Начало\n");
     
-    errcode_t err;
-    int mount_flags;
-    int total_numbers_inodes;
+    
+
     if (argc != 2) {
         fprintf(stderr, "%s <device>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-    errcode_t err = ext2fs_check_if_mounted(argv[1], &mount_flags); //Проверяем смонтировано ли устройство
-    if (err) {
-        fprintf(stderr, "Ошибка при проверке монтирования устройства: %s\n", error_message(err));
-        return 1;
-    }
 
-    if (mount_flags) {
-        printf("Устройство смонтировано. Размонтируйте его\n");
-        return 1;
-    } 
+     
+    open_fs(&fs, argv[1]);
 
-    err = ext2fs_open(argv[1], EXT2_FLAG_RW, 0, 0, NULL, &fs); //Открытие ФС
-    if (err) {
-        fprintf(stderr, "Ошибка открытия файловой системы: %s\n", error_message(err));
-        exit(EXIT_FAILURE);
-    }
-
-    if(fs->super->s_magic != EXT2_SUPER_MAGIC){
-        printf("Неизвестный тип файловой системы\n");
-    }
-
-    BLOCK_SIZE = fs->blocksize;
-
+    printf("ШАГ1: Проверка целостноcти блоков данных, групповых дескрипторов\n");
     check_gr_desc_and_inodes_and_data(&fs);
-
+    
+    printf("ШАГ 2: Проверка контрольных сумм суперблока, групповых дескрипторов, bitmap, inode table\n");
     check_csum_fs(&fs);
 
-    print_filesystem_info(&fs); 
+    //printf("ШАГ 3: Проверка структуры каталогов\n");
 
-    err = ext2fs_close(fs);//Закрытие ФС
+    print_filesystem_info(&fs); 
+    printf("\n6\n");
+    errcode_t err = ext2fs_close(fs);//Закрытие ФС
     if(err){
         fprintf(stderr, "Ошибка закрытия файловой системы: %s\n", error_message(err));
         exit(EXIT_FAILURE);
@@ -95,56 +98,10 @@ int main(int argc, char **argv){
     return 0;
 }
 
-void print_filesystem_info(ext2_filsys *fs){
-    prinf("%s: **** ИНФОРМАЦИЯ ОБ УСТРОЙСТВЕ ****\n\n", (*fs)->device_name);
-    printf("использовано inodes: %d out of %d\n", (*fs)->super->s_inodes_count - (*fs)->super->s_free_inodes_count, (*fs)->super->s_blocks_count); //20 inodes used out of 192000)
-    printf("использовано блоков: %d out of %d", (*fs)->super->s_blocks_count - (*fs)->super->s_free_blocks_count, (*fs)->super->s_blocks_count); // 30884 blocks used (4.02%, out of 768000)
-    printf("размер блока: %d",(*fs)->blocksize);
-    //printf("bad блоков: %d", (*fs)->badblocks->count);
 
-    struct Marker cnt_filetype = { 0 };
-    count_file_types(&cnt_filetype, fs);
-
-    printf("Обычные файлы: %d\n", cnt_filetype.reg_files);
-    printf("Каталоги: %d\n", cnt_filetype.direct);
-    printf("Символьные устройства: %d\n", cnt_filetype.char_dev_files);
-    printf("Блочные устройства: %d\n", cnt_filetype.block_dev_files);
-    printf("FIFOs: %d\n", cnt_filetype.fifos);
-    printf("Сокеты: %d\n", cnt_filetype.sockets);
-    printf("Символические ссылки: %d\n", cnt_filetype.symlink);
-    printf("---------------\nВсего файлов: %d", cnt_filetype.block_dev_files + cnt_filetype.char_dev_files + cnt_filetype.direct + cnt_filetype.fifos + 
-    cnt_filetype.symlink + cnt_filetype.reg_files + cnt_filetype.sockets + cnt_filetype.uncnows_files);
-}
-
-void count_file_types(struct Marker *cnt_types, ext2_filsys *fs){
-
-    struct ext2_inode inode;
-
-    for(ext2_ino_t i = EXT2_FIRST_INO((*fs)->super); i <= (*fs)->super->s_inodes_count; i++){
-        if(ext2fs_test_inode_bitmap((*fs)->inode_map, i) == 1){ //inode действующий
-            ext2fs_read_inode((*fs), i, &inode);       //тут моежт быть проверка на целостность. Может и не считаться
-             // Определение типа файла
-            if (S_ISREG(inode.i_mode))//
-                (*cnt_types).reg_files++;
-            else if (S_ISDIR(inode.i_mode)) //
-                (*cnt_types).direct++;
-            else if (S_ISCHR(inode.i_mode))//
-               (*cnt_types).char_dev_files++;
-            else if (S_ISBLK(inode.i_mode))//
-                (*cnt_types).block_dev_files++;
-            else if (S_ISFIFO(inode.i_mode))//
-                (*cnt_types).fifos++;
-            else if (S_ISLNK(inode.i_mode))//
-                (*cnt_types).symlink++;
-            else if (S_ISSOCK(inode.i_mode))
-                (*cnt_types).sockets++;
-            else
-               (*cnt_types).uncnows_files++;
-        }
-    }
-}
 
 void check_gr_desc_and_inodes_and_data(ext2_filsys *fs){
+
     errcode_t err;
 
     err = ext2fs_check_desc(*fs); //Эта функция проверяет структуру дескрипторов файловой системы на целостность.
@@ -207,7 +164,6 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
     private_data->dirent = dirent;
     
     err = ext2fs_read_inode(fs, dirent->inode, &inode);
-    //printf("Directory entry name: %.*s\n", dirent->name_len, dirent->name);
     if (!S_ISCHR(inode.i_mode) && !S_ISBLK(inode.i_mode) && !S_ISLNK(inode.i_mode)) //S_ISCHR   S_ISBLK  S_ISLNK
     {   
          // Проверяем, является ли inode действующим в inode bitmap
@@ -215,7 +171,7 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
             printf("Файловый inode не является действительным: %u\nфайл: %s", dirent->inode, dirent->name);
         }
         
-        if(ext2_inode_has_valid_blocks (&inode) == 0){
+        if(ext2fs_inode_has_valid_blocks(&inode) == 0){
             printf("Блоки данных файла не действительны\nфайл: %.*s\n", dirent->name_len, dirent->name);
         }
     }
@@ -242,13 +198,16 @@ int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
     int *found_bad_block = (int *)private;
     errcode_t err;
 
-    // Проверяем, является ли блок битым    
+    // Проверяем, отмечен ли используемы блок в карте блоков   
     if (ext2fs_test_block_bitmap(fs->block_map, *blocknr) == 0) {
         //printf("Битый блок: %u\n", *blocknr);
         (*found_bad_block)++;
     }
     return 0;
 }
+
+
+////////////////////////////////////
 
 void check_csum_fs(ext2_filsys *fs){
     errcode_t err;
@@ -295,7 +254,7 @@ void check_csum_fs(ext2_filsys *fs){
             continue;
         }
 
-        err = ext2fs_inode_bitmap_csum_verify((*fs), num_group, inode_bitmap_block, BLOCK_SIZE);
+        err = ext2fs_inode_bitmap_csum_verify((*fs), num_group, bitmap_buffer, BLOCK_SIZE);
         if(err){
             printf("Контрольная сумма карты inodes группы блоков №%d не совпало с вычисленной\n", num_group);
             //continue;
@@ -339,4 +298,160 @@ int read_block(ext2_filsys *fs, __u32 block_num, char* buf){
 
     close(fd);
     return 0;
+}
+
+
+
+void repair_bitmaps(ext2_filsys* fs){
+
+}
+
+//.............................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ.................................//
+void read_bitmaps(ext2_filsys* fs){
+    errcode_t err;
+    //чтение растрового изображение карты inodes
+    err = ext2fs_read_inode_bitmap((*fs));
+    if(err){
+        fprintf(stderr, "Ошибка чтения inode_map: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+
+    //чтение растрового изображения карты блоков
+    err = ext2fs_read_block_bitmap(*fs);
+    if(err){
+        fprintf(stderr, "Ошибка чтения block_bitmap: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+
+}
+
+void write_bitmaps(ext2_filsys* fs){
+    errcode_t err;
+    //запись растрового изображения карты inodes
+    err = ext2fs_write_inode_bitmap(*fs);
+    if(err){
+        fprintf(stderr, "Ошибка записи inode_map на диск: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+
+    //запись астрового изображения карты блоков на диск
+    err = ext2fs_write_block_bitmap(*fs);
+    if(err){
+        fprintf(stderr, "Ошибка записи block_bitmap на диск: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+
+}
+
+
+void open_fs(ext2_filsys* fs, char* name_device){
+
+    errcode_t err = 0;
+    int mount_flags = 0;
+    err = ext2fs_check_if_mounted(name_device, &mount_flags); //Проверяем смонтировано ли устройство
+    if (err) {
+        fprintf(stderr, "Ошибка при проверке монтирования устройства: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+
+    if (mount_flags) {
+        printf("Устройство смонтировано. Размонтируйте его\n");
+        exit(EXIT_FAILURE);
+    } 
+   
+
+    err = ext2fs_open(name_device, EXT2_FLAG_RW, 0, 0, unix_io_manager, fs); //Открытие ФС
+    if (err) {
+        fprintf(stderr, "Ошибка открытия файловой системы: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+    
+    read_bitmaps(fs); //считывание с диска растровых изображений
+    
+    if((*fs)->super->s_magic != EXT2_SUPER_MAGIC){
+        printf("Неизвестный тип файловой системы\n");
+        exit(EXIT_FAILURE);
+    }
+    BLOCK_SIZE = (*fs)->blocksize;
+}
+
+
+void print_filesystem_info(ext2_filsys *fs) {
+    printf("\n1\n");
+    printf("%s: **** ИНФОРМАЦИЯ ОБ УСТРОЙСТВЕ ****\n\n", (*fs)->device_name);
+    printf("использовано inodes: %d out of %d\n", (*fs)->super->s_inodes_count - (*fs)->super->s_free_inodes_count, (*fs)->super->s_inodes_count); //20 inodes used out of 192000)
+    printf("использовано блоков: %d out of %d\n", (*fs)->super->s_blocks_count - (*fs)->super->s_free_blocks_count, (*fs)->super->s_blocks_count); // 30884 blocks used (4.02%, out of 768000)
+    printf("размер блока: %d", (*fs)->blocksize);
+    // printf("bad блоков: %d", (*fs)->badblocks->count);
+    printf("\n2\n");
+    struct Marker cnt_filetype = { 0 };
+    count_file_types(&cnt_filetype, *fs);
+    printf("\5\n");
+    printf("Обычные файлы: %d\n", cnt_filetype.reg_files);
+    printf("Каталоги: %d\n", cnt_filetype.direct);
+    printf("Символьные устройства: %d\n", cnt_filetype.char_dev_files);
+    printf("Блочные устройства: %d\n", cnt_filetype.block_dev_files);
+    printf("FIFOs: %d\n", cnt_filetype.fifos);
+    printf("Сокеты: %d\n", cnt_filetype.sockets);
+    printf("Символические ссылки: %d\n", cnt_filetype.symlink);
+    printf("Неизвестные файла: %d\n", cnt_filetype.uncnows_files);
+    printf("---------------\nВсего файлов: %d", cnt_filetype.block_dev_files + cnt_filetype.char_dev_files + cnt_filetype.direct + cnt_filetype.fifos + cnt_filetype.symlink + cnt_filetype.reg_files + cnt_filetype.sockets);
+}
+
+
+void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
+    // Убедитесь, что fs не является нулевым указателем
+    if (fs == NULL) {
+        fprintf(stderr, "Ошибка: файловая система не инициализирована\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Проверьте, что inode_map инициализирован
+    if (fs->inode_map == NULL) {
+        fprintf(stderr, "Ошибка: inode_map не инициализирован\n");
+        exit(EXIT_FAILURE);
+    }
+    ext2fs_read_inode_bitmap(fs);
+  
+    errcode_t err;
+    ext2_ino_t i;
+
+    printf("\n3\n");
+    for (i = EXT2_FIRST_INO(fs->super); i <= fs->super->s_inodes_count; i++) {
+        if (!ext2fs_test_inode_bitmap(fs->inode_map, i))  //inode действующий
+            continue;
+
+            struct ext2_inode inode;
+            err = ext2fs_read_inode(fs, i, &inode);       //тут моежт быть проверка на целостность. Может и не считаться
+            if (err) {
+                fprintf(stderr, "Ошибка чтения inode %u: %s\n", i, error_message(err));
+                continue;
+            }
+            // Определение типа файла
+            if (S_ISREG(inode.i_mode))//
+                {
+                    cnt_types->reg_files++;
+                    printf("i = %d\n", i);
+                    
+                }
+            else if (S_ISDIR(inode.i_mode)) //
+                {
+                    cnt_types->direct++;
+                    printf("i = %d\n", i);
+                    printf("dtame = %d\n", inode.i_dtime);
+                }
+            else if (S_ISCHR(inode.i_mode))//
+                cnt_types->char_dev_files++;
+            else if (S_ISBLK(inode.i_mode))//
+                cnt_types->block_dev_files++;
+            else if (S_ISFIFO(inode.i_mode))//
+                cnt_types->fifos++;
+            else if (S_ISLNK(inode.i_mode))//
+                cnt_types->symlink++;
+            else if (S_ISSOCK(inode.i_mode))
+                cnt_types->sockets++;
+            else
+                cnt_types->uncnows_files++;
+    }
+   
 }
