@@ -88,7 +88,6 @@ int main(int argc, char **argv){
     //printf("ШАГ 3: Проверка структуры каталогов\n");
 
     print_filesystem_info(&fs); 
-    printf("\n6\n");
     errcode_t err = ext2fs_close(fs);//Закрытие ФС
     if(err){
         fprintf(stderr, "Ошибка закрытия файловой системы: %s\n", error_message(err));
@@ -377,16 +376,15 @@ void open_fs(ext2_filsys* fs, char* name_device){
 
 
 void print_filesystem_info(ext2_filsys *fs) {
-    printf("\n1\n");
     printf("%s: **** ИНФОРМАЦИЯ ОБ УСТРОЙСТВЕ ****\n\n", (*fs)->device_name);
     printf("использовано inodes: %d out of %d\n", (*fs)->super->s_inodes_count - (*fs)->super->s_free_inodes_count, (*fs)->super->s_inodes_count); //20 inodes used out of 192000)
     printf("использовано блоков: %d out of %d\n", (*fs)->super->s_blocks_count - (*fs)->super->s_free_blocks_count, (*fs)->super->s_blocks_count); // 30884 blocks used (4.02%, out of 768000)
     printf("размер блока: %d", (*fs)->blocksize);
     // printf("bad блоков: %d", (*fs)->badblocks->count);
-    printf("\n2\n");
+
     struct Marker cnt_filetype = { 0 };
     count_file_types(&cnt_filetype, *fs);
-    printf("\5\n");
+
     printf("Обычные файлы: %d\n", cnt_filetype.reg_files);
     printf("Каталоги: %d\n", cnt_filetype.direct);
     printf("Символьные устройства: %d\n", cnt_filetype.char_dev_files);
@@ -411,12 +409,12 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
         fprintf(stderr, "Ошибка: inode_map не инициализирован\n");
         exit(EXIT_FAILURE);
     }
-    ext2fs_read_inode_bitmap(fs);
+    //ext2fs_read_inode_bitmap(fs);
   
     errcode_t err;
     ext2_ino_t i;
 
-    printf("\n3\n");
+   
     for (i = EXT2_FIRST_INO(fs->super); i <= fs->super->s_inodes_count; i++) {
         if (!ext2fs_test_inode_bitmap(fs->inode_map, i))  //inode действующий
             continue;
@@ -429,17 +427,9 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
             }
             // Определение типа файла
             if (S_ISREG(inode.i_mode))//
-                {
                     cnt_types->reg_files++;
-                    printf("i = %d\n", i);
-                    
-                }
             else if (S_ISDIR(inode.i_mode)) //
-                {
-                    cnt_types->direct++;
-                    printf("i = %d\n", i);
-                    printf("dtame = %d\n", inode.i_dtime);
-                }
+                cnt_types->direct++;
             else if (S_ISCHR(inode.i_mode))//
                 cnt_types->char_dev_files++;
             else if (S_ISBLK(inode.i_mode))//
