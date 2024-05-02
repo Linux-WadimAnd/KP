@@ -29,31 +29,21 @@ struct Marker{
      unsigned long uncnows_files;
 };
 
-bool flag_need_repair_bitmaps = false; //если обнаружится что файл по факту действующий, но в inode_bitmap он не отмечен, значит флаг стнет true и надо это исправить в функции void repair_bitmaps(ext2_filsys* fs)
 
 int read_block(ext2_filsys *fs, blk_t block_num, char* buf); //вернёт 0 если всё ок
 
 void check_csum_fs(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
 
-void check_gr_desc_and_inodes_and_data(ext2_filsys *fs);//ПРОВЕРКА СТРУКТУРЫ ДЕСКРИПТОРОВ ГРУПП 
-
-void check_all_files(ext2_filsys* fs, ext2_ino_t dir, int* b_blocks);// ПРОВЕРКА ТОГО, ЧТО СУЩЕСВТУЮЩИЕ ФАЙЛЫ ПОМЕЧЕНЫ КАК ИСПОЛЬЗУЕМЫЕ В inode- и block bitmap 
-
-int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private); //ФУНКЦИЯ КОТОРАЯ ВЫЗЫВАЕТСЯ КОГДА ИТЕРИРУЕМСЯ ПО КАТАЛОГУ(ПРОВЕРКА ЧТО Блоки данных файла действительны и Файловый inode не является действительным)
-
-errcode_t check_data_blocks(ext2_filsys* fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block); //ТУТ МЫ Итерируемся по блокам данных inode 
-
-int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private); // сверяемс блоки данных файла с block_bitmap
-
-
 //................ПОКА ТОЛЬКО ИДЕЯ.........................//
+
+bool flag_need_repair_bitmaps = false; //если обнаружится что файл по факту действующий, но в inode_bitmap он не отмечен, значит флаг стнет true и надо это исправить в функции void repair_bitmaps(ext2_filsys* fs)
 
 //void check_sum_entry_dir();
 
 void repair_bitmaps(ext2_filsys* fs); // НЕ РЕАЛИЗОВАННАЯ ИДЕЯ. МОЖНО ПОЧИНИТЬ ПРОХОДЯСЬ ПО ВСЕМ inodes и их i_mode и i_dtame и сверяясь по функции ext2fs_test_inode_bitmap
 
-
 //................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ..................//
+
 void print_filesystem_info(ext2_filsys *fs); //вывод информации про ФС
 
 void count_file_types(struct Marker *cnt_types, ext2_filsys fs);
@@ -64,156 +54,42 @@ void read_bitmaps(ext2_filsys* fs);
 
 void write_bitmaps(ext2_filsys* fs);
 
+void check_gr_desc_and_inodes_and_data(ext2_filsys *fs);//ПРОВЕРКА СТРУКТУРЫ ДЕСКРИПТОРОВ ГРУПП 
+
+void check_all_files(ext2_filsys* fs, ext2_ino_t dir, int* b_blocks);// ПРОВЕРКА ТОГО, ЧТО СУЩЕСВТУЮЩИЕ ФАЙЛЫ ПОМЕЧЕНЫ КАК ИСПОЛЬЗУЕМЫЕ В inode- и block bitmap 
+
+int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private); //ФУНКЦИЯ КОТОРАЯ ВЫЗЫВАЕТСЯ КОГДА ИТЕРИРУЕМСЯ ПО КАТАЛОГУ(ПРОВЕРКА ЧТО Блоки данных файла действительны и Файловый inode не является действительным)
+
+int test_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private); // сверяемс блоки данных файла с block_bitmap
 
 
 int main(int argc, char **argv){
     setlocale(LC_ALL, "Rus");
     ext2_filsys fs = NULL; //дескриптор файловой системы | объявляешь переменную ext2_filsys fs - создаешь указатель на структуру struct struct_ext2_filsys
     printf("Начало\n");
-    
-    
 
     if (argc != 2) {
         fprintf(stderr, "%s <device>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-
      
     open_fs(&fs, argv[1]);
 
     printf("ШАГ1: Проверка целостноcти блоков данных, групповых дескрипторов\n");
     check_gr_desc_and_inodes_and_data(&fs);
 
-    //printf("ШАГ 2: Проверка контрольных сумм суперблока, групповых дескрипторов, bitmap, inode table\n");
-    //check_csum_fs(&fs);
+    printf("ШАГ 2: Проверка контрольных сумм суперблока, групповых дескрипторов, bitmap, inode table\n");
+    check_csum_fs(&fs);
 
     //printf("ШАГ 3: Проверка структуры каталогов\n");
 
-    //print_filesystem_info(&fs); 
+    print_filesystem_info(&fs); 
     errcode_t err = ext2fs_close(fs);//Закрытие ФС
     if(err){
         fprintf(stderr, "Ошибка закрытия файловой системы: %s\n", error_message(err));
         exit(EXIT_FAILURE);
     }
     
-    return 0;
-}
-
-
-
-void check_gr_desc_and_inodes_and_data(ext2_filsys *fs){
-
-    errcode_t err;
-    int b_blocks;
-
-    err = ext2fs_check_desc(*fs); //Эта функция проверяет структуру дескрипторов файловой системы на целостность.
-    if (err) {
-        fprintf(stderr, "Ошибка при проверке целостности дескрипторов файловой системы: %s\n", error_message(err));
-         exit(EXIT_FAILURE);
-        // Дальнейшие действия для восстановления или обработки ошибки
-        // Например, попытка восстановления из резервных копий
-    }
-
-    check_all_files(fs, EXT2_ROOT_INO, &b_blocks); //EXT2_ROOT_INO - это макрос, представляющий номер inode корневого каталога в файловой системе Ext2
-    
-    printf("Биты файлов(bad blocks), помеченные как неиспользуемые в bitmap: %d\n", b_blocks);
-
-}
-
-void check_all_files(ext2_filsys* fs, ext2_ino_t dir, int* b_blocks) {
-    errcode_t err;
-    int flags = 0;
-    PrivateData private_data = {fs, b_blocks};
-    //int found_bad_block = *b_blocks;
-    err = ext2fs_dir_iterate(*fs, dir, flags, NULL, process_dir_entry, &private_data);
-    if(err){
-        printf("Ошибка итерации по каталогу inode = %d\n", dir);
-        return;
-    }
-}
-
-int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private) {
-    if(dirent->name[0] == '.')
-        return 0;
-    //printf("inodes = %d, name = %s\n",dirent->inode, dirent->name);
-    errcode_t err;
-    struct ext2_inode inode;
-    bool flag_error = false;
-    PrivateData *private_data = (PrivateData *)private;
-    ext2_filsys* fs = (*private_data).fs;
-    int found_bad_block = 0;
-    if (!ext2fs_test_inode_bitmap((*fs)->inode_map, dirent->inode)) {
-        printf("Файловый inode = %d не отмечен в inode_bitmap как использующийся для файла %.*s", dirent->inode, dirent->name_len, dirent->name);
-        flag_error = true;
-    }
-
-    err = ext2fs_read_inode(*fs, dirent->inode, &inode);
-    if(err){
-        printf("Ошибка считывания inode = %d файла %s\n", dirent->inode, dirent->name); //можно удалить этот файл и пометить в inode_bitmap
-        return 0;
-    }
-
-    if (!S_ISCHR(inode.i_mode) && !S_ISBLK(inode.i_mode) && !S_ISLNK(inode.i_mode)) //S_ISCHR   S_ISBLK  S_ISLNK
-    {   
-        if(!ext2fs_inode_has_valid_blocks(&inode)){
-            printf("Блоки данных файла %.*s не действительны\n", dirent->name_len, dirent->name);
-            flag_error = true;
-        }
-    }
-
-      // Проверяем блоки данных inode
-    if(S_ISDIR(inode.i_mode) || S_ISREG(inode.i_mode))
-    {
-        err = check_data_blocks(fs, dirent->inode, &inode, private_data->b_blocks);
-        if (err) {
-            if(S_ISREG(inode.i_mode))
-            {
-                printf("Ошибка проверки (не удалось проитерироваться) блоков данных inode %d - файла %s: %s\n", dirent->inode, dirent->name);
-                return 0; printf("1\n");
-            }
-            if(S_ISDIR(inode.i_mode)){
-                printf("Наружешие структуры каталогов, не удалось проитерироваться по блокам данных каталога %s\n", dirent->name);
-                return 0;
-            }
-            return 0;
-        }
-    }
-
-
-    if (S_ISDIR(inode.i_mode))
-    {   
-        if(flag_error == true)
-            printf("Невозможно открыть и проверить каталог %s из-за нарушения его целостности\n", dirent->name);
-        else
-            check_all_files(fs, dirent->inode, private_data->b_blocks);
-
-    }
-
-  
-    return 0;
-}
-
-
-errcode_t check_data_blocks(ext2_filsys* fs, ext2_ino_t inode_num, struct ext2_inode *inode, int *found_bad_block){
-    printf("1\n");
-    errcode_t err;
-    // Итерируемся по блокам данных inode
-    err = ext2fs_block_iterate(*fs, inode_num, BLOCK_FLAG_DATA_ONLY, NULL, process_block, found_bad_block);
-    return err;
-
-}
-
-int process_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
-
-    printf("2\n");
-    int *found_bad_block = (int *)private;
-    errcode_t err;
-
-    // Проверяем, отмечен ли используемый блок в карте блоков   
-    if (!ext2fs_test_block_bitmap(fs->block_map, *blocknr)) {
-        //printf("Битый блок: %u\n", *blocknr);
-        (*found_bad_block)++;
-    }
     return 0;
 }
 
@@ -441,10 +317,12 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
             if (S_ISREG(inode.i_mode))//
             {
                 cnt_types->reg_files++;
+                printf("Обычный файл inode = %d\n", i);
             }
             else if (S_ISDIR(inode.i_mode)) //
             {
                 cnt_types->direct++;
+                printf("Каталог inode = %d\n", i);
             }
             else if (S_ISCHR(inode.i_mode))//
                 cnt_types->char_dev_files++;
@@ -463,4 +341,112 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
                 cnt_types->uncnows_files++;
     }
    
+}
+
+void check_gr_desc_and_inodes_and_data(ext2_filsys *fs){
+
+    errcode_t err;
+    int b_blocks = 0;
+
+    err = ext2fs_check_desc(*fs); //Эта функция проверяет структуру дескрипторов файловой системы на целостность.
+    if (err) {
+        fprintf(stderr, "Ошибка при проверке целостности дескрипторов файловой системы: %s\n", error_message(err));
+         exit(EXIT_FAILURE);
+        // Дальнейшие действия для восстановления или обработки ошибки
+        // Например, попытка восстановления из резервных копий
+    }
+
+    check_all_files(fs, EXT2_ROOT_INO, &b_blocks); //EXT2_ROOT_INO - это макрос, представляющий номер inode корневого каталога в файловой системе Ext2
+    
+    printf("Блоки данных файлов(bad blocks), помеченные как неиспользуемые в bitmap: %d\n", b_blocks);
+
+}
+
+void check_all_files(ext2_filsys* fs, ext2_ino_t dir, int* b_blocks) {
+    errcode_t err;
+    int flags = 0;
+    PrivateData private_data = {fs, b_blocks};
+    //int found_bad_block = *b_blocks;
+    err = ext2fs_dir_iterate(*fs, dir, flags, NULL, process_dir_entry, &private_data);
+    if(err){
+        printf("Ошибка итерации по каталогу inode = %d\n", dir);
+        return;
+    }
+}
+
+int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, char *buf, void *private) {
+
+    if(dirent->name[0] == '.')
+        return 0;
+    errcode_t err;
+    struct ext2_inode inode;
+    bool flag_error = false;
+    PrivateData *private_data = (PrivateData *)private;
+    ext2_filsys* fs = (*private_data).fs;
+    //int found_bad_block = 0;
+
+    if (!ext2fs_test_inode_bitmap((*fs)->inode_map, dirent->inode)) {
+        printf("Файловый inode = %d не отмечен в inode_bitmap как использующийся для файла %.*s", dirent->inode, dirent->name_len, dirent->name);
+        flag_error = true;
+    }
+
+    err = ext2fs_read_inode(*fs, dirent->inode, &inode);
+    if(err){
+        printf("Ошибка считывания inode = %d файла %s\n", dirent->inode, dirent->name); //можно удалить этот файл и пометить в inode_bitmap
+        return 0;
+    }
+
+    if (!S_ISCHR(inode.i_mode) && !S_ISBLK(inode.i_mode) && !S_ISLNK(inode.i_mode)) //S_ISCHR   S_ISBLK  S_ISLNK
+    {   
+        if(!ext2fs_inode_has_valid_blocks(&inode)){
+            printf("Блоки данных файла %.*s не действительны\n", dirent->name_len, dirent->name);
+            flag_error = true;
+        }
+    }
+
+    // Проверяем блоки данных inode
+    if(S_ISDIR(inode.i_mode) || S_ISREG(inode.i_mode))
+    {   
+        //err = check_data_blocks(fs, dirent->inode, &inode, private_data->b_blocks);
+        err = ext2fs_block_iterate(*fs, dirent->inode, BLOCK_FLAG_DATA_ONLY, NULL, test_block, private_data->b_blocks);
+        if (err) {
+            if(S_ISREG(inode.i_mode))
+            {
+                printf("Ошибка проверки (не удалось проитерироваться) блоков данных inode %d - файла %s: %s\n", dirent->inode, dirent->name);
+                return 0; 
+            }
+            if(S_ISDIR(inode.i_mode)){
+                printf("Нарушение структуры каталогов, не удалось проитерироваться по блокам данных каталога %s\n", dirent->name);
+                return 0;
+            }
+        }
+
+    }
+
+
+    if (S_ISDIR(inode.i_mode))
+    {   
+        if(flag_error == true)
+            printf("Невозможно открыть и проверить каталог %s из-за нарушения его целостности\n", dirent->name);
+        else
+            check_all_files(fs, dirent->inode, private_data->b_blocks);
+
+    }
+
+  
+    return 0;
+}
+
+
+int test_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
+
+    int *not_found_blocks = (int *)private;
+    errcode_t err;
+
+    // Проверяем, отмечен ли используемый блок в карте блоков   
+    if (!ext2fs_test_block_bitmap(fs->block_map, *blocknr)) {
+        printf("Битый блок: %u\n", *blocknr);
+        (*not_found_blocks)++;
+    }
+    return 0;
 }
