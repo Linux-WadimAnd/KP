@@ -30,9 +30,7 @@ struct Marker{
 };
 
 
-int read_block(ext2_filsys *fs, blk_t block_num, char* buf); //вернёт 0 если всё ок
 
-void check_csum_fs(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
 
 //................ПОКА ТОЛЬКО ИДЕЯ.........................//
 
@@ -43,6 +41,8 @@ bool flag_need_repair_bitmaps = false; //если обнаружится что 
 void repair_bitmaps(ext2_filsys* fs); // НЕ РЕАЛИЗОВАННАЯ ИДЕЯ. МОЖНО ПОЧИНИТЬ ПРОХОДЯСЬ ПО ВСЕМ inodes и их i_mode и i_dtame и сверяясь по функции ext2fs_test_inode_bitmap
 
 //................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ..................//
+
+void check_csum_fs(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
 
 void print_filesystem_info(ext2_filsys *fs); //вывод информации про ФС
 
@@ -62,6 +62,14 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
 
 int test_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private); // сверяемс блоки данных файла с block_bitmap
 
+void close_fs(ext2_filsys* fs);
+
+static __u32 ext2fs_superblock_csum(ext2_filsys fs, struct ext2_super_block *sb);
+
+int ext2fs_superblock_csum_my_verify(ext2_filsys fs, struct ext2_super_block* sb); //оригинал из библиотеки ext2fs всегда выдаёт неправильно
+
+int ext2fs_superblock_csum_my_verify(ext2_filsys fs, struct ext2_super_block* sb); //1 в случае совпадения, 0 в случае несовпадения
+
 
 int main(int argc, char **argv){
     setlocale(LC_ALL, "Rus");
@@ -74,118 +82,27 @@ int main(int argc, char **argv){
     }
      
     open_fs(&fs, argv[1]);
-
+    
+    
     printf("ШАГ1: Проверка целостноcти блоков данных, групповых дескрипторов\n");
     check_gr_desc_and_inodes_and_data(&fs);
 
-    printf("ШАГ 2: Проверка контрольных сумм суперблока, групповых дескрипторов, bitmap, inode table\n");
+    printf("ШАГ 2: Проверка контрольных сумм суперблока, групповых дескрипторов, inode_bitmap, block_bitmap\n");
     check_csum_fs(&fs);
 
     //printf("ШАГ 3: Проверка структуры каталогов\n");
 
     print_filesystem_info(&fs); 
-    errcode_t err = ext2fs_close(fs);//Закрытие ФС
-    if(err){
-        fprintf(stderr, "Ошибка закрытия файловой системы: %s\n", error_message(err));
-        exit(EXIT_FAILURE);
-    }
-    
+
+    close_fs(&fs);
+
+   
     return 0;
 }
 
 
-////////////////////////////////////
+//////////////////////////////////////
 
-void check_csum_fs(ext2_filsys *fs){
-    errcode_t err;
-    err = ext2fs_verify_csum_type(*fs, (*fs)->super);
-    if(err){
-        printf("Тип контрольной суммы не поддерживается файловой системой\n");
-        return;
-    }
-
-    err = ext2fs_superblock_csum_verify((*fs), (*fs)->super); // Проверяет контрольную сумму суперблока.
-    if(err){
-        printf("Контрольная сумма суперблока не совпала с вычисленной контрольной суммой\n");
-        //заменяем на резервную копию из другой группы блоков 
-    }
-
-    for(dgrp_t num_group = 0; num_group < (*fs)->group_desc_count; num_group++){
-        err = ext2fs_group_desc_csum_verify((*fs), num_group);
-        if(err){
-            printf("Контрольная сумма группы блоков №%d не совпала с вычисленной\n", num_group); 
-            //заменяем на копию из другой группы блоков
-        }
-
-        struct ext2_group_desc *group_desc = ext2fs_group_desc((*fs), (*fs)->group_desc, num_group); //возвращает указатель на структуру ext2_group_desc, которая содержит информацию о группе блоков group.
-        __u32 block_bitmap_block = (*group_desc).bg_block_bitmap;
-        __u32 inode_bitmap_block = (*group_desc).bg_inode_bitmap;
-
-        char* bitmap_buffer = NULL;
-        bitmap_buffer = malloc(BLOCK_SIZE);
-        
-        if(read_block(fs, block_bitmap_block, bitmap_buffer)){
-            printf("Ошибка считывания растрового изображения карты блоков группы блоков №%d\n", num_group);
-            continue;
-        }
-
-        err = ext2fs_block_bitmap_csum_verify((*fs), num_group, bitmap_buffer, BLOCK_SIZE);
-        if(err){
-            printf("Контрольная сумма карты блоков группы блоков №%d не совпало с вычисленной\n", num_group);
-            //continue;
-            //как-то обработать - возможно добавить в bad blocks либо просто пометить
-        }
-
-        if(read_block(fs, inode_bitmap_block, bitmap_buffer)){
-            printf("Ошибка считывания растрового изображения карты блоков группы блоков №%d\n", num_group);
-            continue;
-        }
-
-        err = ext2fs_inode_bitmap_csum_verify((*fs), num_group, bitmap_buffer, BLOCK_SIZE);
-        if(err){
-            printf("Контрольная сумма карты inodes группы блоков №%d не совпало с вычисленной\n", num_group);
-            //continue;
-            //как-то обработать - возможно добавить в bad blocks либо просто пометить
-        }
-
-        free(bitmap_buffer);
-    }
-
-}
-
-int read_block(ext2_filsys *fs, __u32 block_num, char* buf){
-    int fd;
-    ssize_t bytes_read;
-
-    fd = open((*fs)->device_name, O_RDONLY);
-    if (fd < 0) {
-        printf("Failed to open device\n");
-        return -1;
-    }
-
-    if (block_num < 0 || block_num > (*fs)->super->s_blocks_count) {
-        printf("Invalid block number\n");
-        return -1;
-    }
-
-    off_t offset = block_num * BLOCK_SIZE;
-
-    if (lseek(fd, offset, SEEK_SET) == -1) {
-        printf("Failed to seek to block\n");
-        close(fd);
-        return -1;
-    }
-
-    bytes_read = read(fd, buf, BLOCK_SIZE);
-    if (bytes_read != BLOCK_SIZE) {
-        printf("Failed to read block\n");
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    return 0;
-}
 
 
 
@@ -194,12 +111,88 @@ void repair_bitmaps(ext2_filsys* fs){
 }
 
 //.............................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ.................................//
+
+
+static __u32 ext2fs_superblock_csum(ext2_filsys fs, struct ext2_super_block *sb)
+{
+	int offset = offsetof(struct ext2_super_block, s_checksum);
+
+	return ext2fs_crc32c_le(~0, (unsigned char *)sb, offset);
+}
+
+void check_csum_fs(ext2_filsys *fs){
+    
+    errcode_t err = 0;
+    read_bitmaps(fs);
+
+    if(!ext2fs_verify_csum_type(*fs, (*fs)->super)){
+        printf("Тип контрольной суммы не поддерживается файловой системой\n");
+        return;
+    }
+
+    if(!ext2fs_superblock_csum_verify(*fs, (*fs)->super)){
+        printf("Контрольная сумма суперблока не совпала с вычисленной контрольной суммой\n");
+        return;
+    }
+
+    if(!ext2fs_superblock_csum_my_verify(*fs, (*fs)->super)){
+        printf("Контрольная сумма суперблока не совпала с вычисленной контрольной суммой\n");
+        return;
+    }
+
+    if ((*fs)->inode_map == NULL) {
+        printf("Ошибка: inode_map не инициализирован\n");
+        return;
+    }
+    if((*fs)->block_map == NULL){
+        printf("Ошибка: inode_map не инициализирован\n");
+        return;
+    }
+
+    for(dgrp_t num_group = 0; num_group < (*fs)->group_desc_count; num_group++){
+
+        if(!ext2fs_group_desc_csum_verify((*fs), num_group)){
+            printf("Контрольная сумма группы блоков №%d не совпала с вычисленной\n", num_group); 
+            //заменяем на копию из другой группы блоков
+            continue;
+        }
+        
+        struct ext4_group_desc *gdp = (struct ext4_group_desc *)ext2fs_group_desc(*fs, (*fs)->group_desc, num_group);
+
+        __u32 provided_checksum_inode = gdp->bg_inode_bitmap_csum_lo;
+
+        __u32 inode_bitmap_checksum = ext2fs_inode_bitmap_checksum(*fs, num_group);
+
+         if ((*fs)->super->s_desc_size >= EXT4_BG_INODE_BITMAP_CSUM_HI_END)
+            provided_checksum_inode |= (__u32)gdp->bg_inode_bitmap_csum_hi << 16;
+             // Сравниваем контрольные суммы
+        if (inode_bitmap_checksum != provided_checksum_inode) {
+            printf("Контрольная сумма карты инодов группы блоков №%d не совпала с вычисленной\n", num_group);
+            printf("Вычислено = %lx, указана в структуре данных = %ls\n", inode_bitmap_checksum, provided_checksum_inode);
+        }
+
+        __u32 block_bitmap_checksum = ext2fs_block_bitmap_checksum(*fs, num_group);
+                                        
+        __u32 provided_checsum_block = gdp->bg_block_bitmap_csum_lo;
+
+        if ((*fs)->super->s_desc_size >= EXT4_BG_BLOCK_BITMAP_CSUM_HI_LOCATION)
+                 provided_checsum_block |= (__u32)gdp->bg_block_bitmap_csum_hi << 16;
+            
+        if (block_bitmap_checksum != provided_checsum_block) {
+            printf("Контрольная сумма карты блоков группы блоков №%d не совпала с вычисленной\n", num_group);
+            printf("Вычислено = %lx, указана в структуре данных = %ls\n", block_bitmap_checksum, provided_checsum_block);
+        }
+    }
+
+}
+
 void read_bitmaps(ext2_filsys* fs){
     errcode_t err;
     //чтение растрового изображение карты inodes
     err = ext2fs_read_inode_bitmap((*fs));
     if(err){
         fprintf(stderr, "Ошибка чтения inode_map: %s\n", error_message(err));
+        close_fs(fs);
         exit(EXIT_FAILURE);
     }
 
@@ -207,6 +200,7 @@ void read_bitmaps(ext2_filsys* fs){
     err = ext2fs_read_block_bitmap(*fs);
     if(err){
         fprintf(stderr, "Ошибка чтения block_bitmap: %s\n", error_message(err));
+        close_fs(fs);
         exit(EXIT_FAILURE);
     }
 
@@ -218,6 +212,7 @@ void write_bitmaps(ext2_filsys* fs){
     err = ext2fs_write_inode_bitmap(*fs);
     if(err){
         fprintf(stderr, "Ошибка записи inode_map на диск: %s\n", error_message(err));
+        close_fs(fs);
         exit(EXIT_FAILURE);
     }
 
@@ -225,6 +220,7 @@ void write_bitmaps(ext2_filsys* fs){
     err = ext2fs_write_block_bitmap(*fs);
     if(err){
         fprintf(stderr, "Ошибка записи block_bitmap на диск: %s\n", error_message(err));
+        close_fs(fs);
         exit(EXIT_FAILURE);
     }
 
@@ -235,6 +231,7 @@ void open_fs(ext2_filsys* fs, char* name_device){
 
     errcode_t err = 0;
     int mount_flags = 0;
+
     err = ext2fs_check_if_mounted(name_device, &mount_flags); //Проверяем смонтировано ли устройство
     if (err) {
         fprintf(stderr, "Ошибка при проверке монтирования устройства: %s\n", error_message(err));
@@ -246,7 +243,6 @@ void open_fs(ext2_filsys* fs, char* name_device){
         exit(EXIT_FAILURE);
     } 
    
-
     err = ext2fs_open(name_device, EXT2_FLAG_RW, 0, 0, unix_io_manager, fs); //Открытие ФС
     if (err) {
         fprintf(stderr, "Ошибка открытия файловой системы: %s\n", error_message(err));
@@ -257,8 +253,10 @@ void open_fs(ext2_filsys* fs, char* name_device){
     
     if((*fs)->super->s_magic != EXT2_SUPER_MAGIC){
         printf("Неизвестный тип файловой системы\n");
+        close_fs(fs);
         exit(EXIT_FAILURE);
     }
+
     BLOCK_SIZE = (*fs)->blocksize;
 }
 
@@ -281,12 +279,12 @@ void print_filesystem_info(ext2_filsys *fs) {
     printf("Сокеты: %d\n", cnt_filetype.sockets);
     printf("Символические ссылки: %d\n", cnt_filetype.symlink);
     printf("Неизвестные файла: %d\n", cnt_filetype.uncnows_files);
-    printf("---------------\nВсего файлов: %d", cnt_filetype.block_dev_files + cnt_filetype.char_dev_files + cnt_filetype.direct + cnt_filetype.fifos + cnt_filetype.symlink + cnt_filetype.reg_files + cnt_filetype.sockets);
+    printf("---------------\nВсего файлов: %d\n", cnt_filetype.block_dev_files + cnt_filetype.char_dev_files + cnt_filetype.direct + cnt_filetype.fifos + cnt_filetype.symlink + cnt_filetype.reg_files + cnt_filetype.sockets);
 }
 
 
 void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
-    // Убедитесь, что fs не является нулевым указателем
+  
     if (fs == NULL) {
         fprintf(stderr, "Ошибка: файловая система не инициализирована\n");
         exit(EXIT_FAILURE);
@@ -295,16 +293,17 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
     // Проверьте, что inode_map инициализирован
     if (fs->inode_map == NULL) {
         fprintf(stderr, "Ошибка: inode_map не инициализирован\n");
-        exit(EXIT_FAILURE);
+        //exit(EXIT_FAILURE);
+        return;
     }
-    //ext2fs_read_inode_bitmap(fs);
   
     errcode_t err;
     ext2_ino_t i;
 
    
     for (i = EXT2_FIRST_INO(fs->super); i <= fs->super->s_inodes_count; i++) {
-        if (!ext2fs_test_inode_bitmap(fs->inode_map, i))  //inode действующий
+
+        if (!ext2fs_test_inode_bitmap(fs->inode_map, i))  //inode не действующий
             continue;
 
             struct ext2_inode inode;
@@ -315,15 +314,9 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
             }
             // Определение типа файла
             if (S_ISREG(inode.i_mode))//
-            {
                 cnt_types->reg_files++;
-                printf("Обычный файл inode = %d\n", i);
-            }
             else if (S_ISDIR(inode.i_mode)) //
-            {
                 cnt_types->direct++;
-                printf("Каталог inode = %d\n", i);
-            }
             else if (S_ISCHR(inode.i_mode))//
                 cnt_types->char_dev_files++;
             else if (S_ISBLK(inode.i_mode))//
@@ -331,14 +324,12 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
             else if (S_ISFIFO(inode.i_mode))//
                 cnt_types->fifos++;
             else if (S_ISLNK(inode.i_mode))//
-            {
                 cnt_types->symlink++;
-                printf("symlink inode = %d\n", i);
-            }
             else if (S_ISSOCK(inode.i_mode))
                 cnt_types->sockets++;
             else
                 cnt_types->uncnows_files++;
+
     }
    
 }
@@ -449,4 +440,24 @@ int test_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
         (*not_found_blocks)++;
     }
     return 0;
+}
+
+void close_fs(ext2_filsys* fs){
+    errcode_t err = ext2fs_close(*fs);//Закрытие ФС
+    if(err){
+        fprintf(stderr, "Ошибка закрытия файловой системы: %s\n", error_message(err));
+        exit(EXIT_FAILURE);
+    }
+}
+
+int ext2fs_superblock_csum_my_verify(ext2_filsys fs, struct ext2_super_block* sb){ //1 в случае совпадения, 0 в случае несовпадения
+    //return (fs->super->s_checksum == ext2fs_superblock_csum(fs, sb)); 
+    if(fs->super->s_checksum != ext2fs_superblock_csum(fs, sb))
+    {
+        printf("Посчитано %lx, а в суперблоке хранится %lx\n", ext2fs_superblock_csum(fs, sb), fs->super->s_checksum);
+        return 0;
+    }
+    else
+        return 1;
+
 }
