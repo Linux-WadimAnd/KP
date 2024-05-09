@@ -5,11 +5,9 @@
 #include <stdlib.h>
 #include <locale.h>
 #include <sys/stat.h>  // Для макросов S_ISREG, S_ISDIR, S_ISLNK и т.д.
-//#include <zlib.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <stdbool.h>
-
 
 typedef struct {
     ext2_filsys* fs;
@@ -30,6 +28,7 @@ struct Marker{
      unsigned long uncnows_files;
 };
 
+//bool flag_repair
 
 //................ПОКА ТОЛЬКО ИДЕЯ.........................//
 
@@ -42,6 +41,10 @@ bool flag_need_repair_block_bitmap = false;
 void repair_bitmaps(ext2_filsys* fs); // НЕ РЕАЛИЗОВАННАЯ ИДЕЯ. МОЖНО ПОЧИНИТЬ ПРОХОДЯСЬ ПО ВСЕМ inodes и их i_mode и i_dtame и сверяясь по функции ext2fs_test_inode_bitmap
 
 //................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ..................//
+
+bool error_with_csum = false;
+
+bool error_with_celostnost = false;
 
 void check_csum_fs(ext2_filsys *fs); //ПРОЕВРКА КОНТРОЛЬНОЙ СУММЫ ГРУППОВЫХ ДЕСКРИПТОРОВ И СУПЕРБЛОКА(ОСНОВНОГО) И bitmap inodes and data block
 
@@ -75,7 +78,6 @@ int ext2fs_superblock_csum_my_verify(ext2_filsys fs, struct ext2_super_block* sb
 int main(int argc, char **argv){
     setlocale(LC_ALL, "Rus");
     ext2_filsys fs = NULL; //дескриптор файловой системы | объявляешь переменную ext2_filsys fs - создаешь указатель на структуру struct struct_ext2_filsys
-    printf("Начало\n");
 
     if (argc != 2) {
         fprintf(stderr, "%s <device>\n", argv[0]);
@@ -84,13 +86,12 @@ int main(int argc, char **argv){
      
     open_fs(&fs, argv[1]);
     
-    
-    printf("ШАГ1: Проверка целостноcти блоков данных, групповых дескрипторов\n");
+    printf("ШАГ1: Проверка целостноcти метаданных и файлов\n\n");
     check_gr_desc_and_inodes_and_data(&fs);
 
-    printf("ШАГ 2: Проверка контрольных сумм суперблока, групповых дескрипторов, inode_bitmap, block_bitmap\n");
+    printf("ШАГ 2: Проверка контрольных сумм метаданных\n\n");
     check_csum_fs(&fs);
-
+    
     //printf("ШАГ 3: Проверка структуры каталогов\n");
 
     print_filesystem_info(&fs); 
@@ -108,12 +109,10 @@ void repair_bitmaps(ext2_filsys* fs){
 
 }
 
-//.............................УЖЕ ПРОТЕСТИРОВАНО И РАБОТАЕТ.................................//
-
 
 static __u32 ext2fs_superblock_csum(ext2_filsys fs, struct ext2_super_block *sb)
 {
-	int offset = offsetof(struct ext2_super_block, s_checksum);
+	int offset = offsetof(struct ext2_super_block, s_checksum); //смещение поля s_checksum в структуре данных ext2_super_block
 
 	return ext2fs_crc32c_le(~0, (unsigned char *)sb, offset);
 }
@@ -125,25 +124,30 @@ void check_csum_fs(ext2_filsys *fs){
 
     if(!ext2fs_verify_csum_type(*fs, (*fs)->super)){
         printf("Тип контрольной суммы не поддерживается файловой системой\n");
+        error_with_csum = true;
         return;
     }
 
     if(!ext2fs_superblock_csum_verify(*fs, (*fs)->super)){
         printf("Контрольная сумма суперблока не совпала с вычисленной контрольной суммой\n");
+        error_with_csum = true;
         return;
     }
 
     if(!ext2fs_superblock_csum_my_verify(*fs, (*fs)->super)){
         printf("Контрольная сумма суперблока не совпала с вычисленной контрольной суммой\n");
+        error_with_csum = true;
         return;
     }
 
     if ((*fs)->inode_map == NULL) {
         printf("Ошибка: inode_map не инициализирован\n");
+        error_with_csum = true;
         return;
     }
     if((*fs)->block_map == NULL){
         printf("Ошибка: inode_map не инициализирован\n");
+        error_with_csum = true;
         return;
     }
 
@@ -151,37 +155,43 @@ void check_csum_fs(ext2_filsys *fs){
 
         if(!ext2fs_group_desc_csum_verify((*fs), num_group)){
             printf("Контрольная сумма группы блоков №%d не совпала с вычисленной\n", num_group); 
+            error_with_csum = true;
             //заменяем на копию из другой группы блоков
             continue;
         }
         
         struct ext4_group_desc *gdp = (struct ext4_group_desc *)ext2fs_group_desc(*fs, (*fs)->group_desc, num_group);
 
-        __u32 provided_checksum_inode = gdp->bg_inode_bitmap_csum_lo;
-
+        __u32 provided_checksum_inode = gdp->bg_inode_bitmap_csum_lo; //контрольная сумма карты инодов в структуре данных ext4_group_desc
+ 
         __u32 inode_bitmap_checksum = ext2fs_inode_bitmap_checksum(*fs, num_group);
 
          if ((*fs)->super->s_desc_size >= EXT4_BG_INODE_BITMAP_CSUM_HI_END)
             provided_checksum_inode |= (__u32)gdp->bg_inode_bitmap_csum_hi << 16;
              // Сравниваем контрольные суммы
-        if (inode_bitmap_checksum != provided_checksum_inode) {
+        if (inode_bitmap_checksum != provided_checksum_inode) {       //ext2fs_inode_bitmap_csum_verify - не работает почему-то
             printf("Контрольная сумма карты инодов группы блоков №%d не совпала с вычисленной\n", num_group);
             printf("Вычислено = %lx, указана в структуре данных = %ls\n", inode_bitmap_checksum, provided_checksum_inode);
+            error_with_csum = true;
         }
 
         __u32 block_bitmap_checksum = ext2fs_block_bitmap_checksum(*fs, num_group);
                                         
-        __u32 provided_checsum_block = gdp->bg_block_bitmap_csum_lo;
+        __u32 provided_checsum_block = gdp->bg_block_bitmap_csum_lo; //контрольная сумма карты блоков в структуре данных ext4_group_desc
 
         if ((*fs)->super->s_desc_size >= EXT4_BG_BLOCK_BITMAP_CSUM_HI_LOCATION)
                  provided_checsum_block |= (__u32)gdp->bg_block_bitmap_csum_hi << 16;
             
-        if (block_bitmap_checksum != provided_checsum_block) {
+        if (block_bitmap_checksum != provided_checsum_block) {  // ext2fs_block_bitmap_csum_verify - не работает почему-то
             printf("Контрольная сумма карты блоков группы блоков №%d не совпала с вычисленной\n", num_group);
             printf("Вычислено = %lx, указана в структуре данных = %ls\n", block_bitmap_checksum, provided_checsum_block);
+            error_with_csum = true;
         }
     }
 
+    if(!error_with_csum){
+        printf("Ошибок не обнаружено\n\n");
+    }
 }
 
 void read_bitmaps(ext2_filsys* fs){
@@ -237,7 +247,7 @@ void open_fs(ext2_filsys* fs, char* name_device){
     }
 
     if (mount_flags) {
-        printf("Устройство смонтировано. Размонтируйте его\n");
+        printf("Устройство смонтировано. Размонтируйте его перед запуском утилиты\n");
         exit(EXIT_FAILURE);
     } 
    
@@ -336,11 +346,11 @@ void count_file_types(struct Marker *cnt_types, ext2_filsys fs) {
                 cnt_types->sockets++;
             else
                 cnt_types->uncnows_files++;
-
+     
     }
    
 }
-
+//////.........................ШАГ 1...............................///////
 void check_gr_desc_and_inodes_and_data(ext2_filsys *fs){
 
     errcode_t err;
@@ -351,14 +361,20 @@ void check_gr_desc_and_inodes_and_data(ext2_filsys *fs){
         fprintf(stderr, "Ошибка при проверке целостности дескрипторов файловой системы: %s\n", error_message(err));
         close_fs(fs);
         exit(EXIT_FAILURE);
-        // Дальнейшие действия для восстановления или обработки ошибки
-        // Например, попытка восстановления из резервных копий
+        
     }
 
     check_all_files(fs, EXT2_ROOT_INO, &b_blocks); //EXT2_ROOT_INO - это макрос, представляющий номер inode корневого каталога в файловой системе Ext2
     
-    printf("Блоки данных файлов(bad blocks), помеченные как неиспользуемые в bitmap: %d\n", b_blocks);
-
+    if(b_blocks != 0)
+    {   
+        printf("Повреждение block_bitmap\n");
+        printf("Блоки данных файлов, помеченные как неиспользуемые в bitmap: %d\n", b_blocks);
+    }
+    
+    if(!error_with_celostnost){
+        printf("Ошибок не обнаружено\n\n");
+    }
 }
 
 void check_all_files(ext2_filsys* fs, ext2_ino_t dir, int* b_blocks) {
@@ -369,6 +385,7 @@ void check_all_files(ext2_filsys* fs, ext2_ino_t dir, int* b_blocks) {
     err = ext2fs_dir_iterate(*fs, dir, flags, NULL, process_dir_entry, &private_data);
     if(err){
         printf("Ошибка итерации по каталогу inode = %d\n", dir);
+        error_with_celostnost = true;
         return;
     }
 }
@@ -385,16 +402,19 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
     PrivateData *private_data = (PrivateData *)private;
     ext2_filsys* fs = (*private_data).fs;
 
-    if (!ext2fs_test_inode_bitmap((*fs)->inode_map, dirent->inode)) {
-        printf("Файловый inode = %d не отмечен в inode_bitmap как использующийся для файла %.*s", dirent->inode, dirent->name_len, dirent->name);
-        flag_error = true;
-        flag_need_repair_inode_bitmap = true;
-    }
 
     err = ext2fs_read_inode(*fs, dirent->inode, &inode);
     if(err){
         printf("Ошибка считывания inode = %d файла %s\n", dirent->inode, dirent->name); //можно удалить этот файл и пометить в inode_bitmap
+        error_with_celostnost = true;
         return 0;
+    }
+
+    if (!ext2fs_test_inode_bitmap((*fs)->inode_map, dirent->inode)) {
+        printf("Файловый inode = %d не отмечен в inode_bitmap как использующийся для файла %.*s", dirent->inode, dirent->name_len, dirent->name);
+        flag_error = true;
+        flag_need_repair_inode_bitmap = true;
+        error_with_celostnost = true;
     }
 
     if (!S_ISCHR(inode.i_mode) && !S_ISBLK(inode.i_mode) && !S_ISLNK(inode.i_mode)) //S_ISCHR   S_ISBLK  S_ISLNK
@@ -402,55 +422,35 @@ int process_dir_entry(struct ext2_dir_entry *dirent, int offset, int blocksize, 
         if(!ext2fs_inode_has_valid_blocks(&inode)){
             printf("Блоки данных файла %.*s не действительны\n", dirent->name_len, dirent->name);
             flag_error = true;
+            error_with_celostnost = true;
+            //ТУТ МОЖНО СДЕЛАТЬ 
         }
     }
 
     //Проверка контрольной суммы записи в каталоге
     if(!ext2fs_dirent_csum_verify((*fs), dirent->inode, dirent)){
         printf("Запись %s в каталоге имеет неправильную контрольную сумму\n", dirent->name);
+        error_with_celostnost = true;
     }
    
     // Проверяем блоки данных inode
     if(S_ISDIR(inode.i_mode) || S_ISREG(inode.i_mode))
     {   
-        if (inode.i_flags & EXT4_EXTENTS_FL) {
-            // Проверяем экстенты файла
-            ext2_extent_handle_t handle;
-            err = ext2fs_extent_open2(*fs, dirent->inode, &inode, &handle);
-            if (err) {
-                printf("Ошибка открытия экстентов inode %d - файла %s\n", dirent->inode, dirent->name);
+        err = ext2fs_block_iterate(*fs, dirent->inode, BLOCK_FLAG_DATA_ONLY, NULL, test_block, private_data->b_blocks);
+        if (err) {
+            if(S_ISREG(inode.i_mode))
+            {
+                printf("Ошибка проверки (не удалось проитерироваться) блоков данных inode %d - файла %s: %s\n", dirent->inode, dirent->name);
+                error_with_celostnost = true;
+                return 0; 
+            }
+            if(S_ISDIR(inode.i_mode)){
+                printf("Нарушение структуры каталогов, не удалось проитерироваться по блокам данных каталога %s\n", dirent->name);
+                error_with_celostnost = true;
                 return 0;
             }
-
-            struct ext2fs_extent extent;
-            while (ext2fs_extent_get(handle, EXT2_EXTENT_NEXT_SIB, &extent) == 0) {
-                err = ext2fs_extent_header_verify(&extent, sizeof(struct ext2fs_extent));
-                if(err){
-                    printf("Ошибка проверки заголовка экстента в файле %s\n", dirent->name);
-                }
-
-                //В РАЗРАБОТКЕ
-
-            }
-            ext2fs_extent_free(handle);
-        
-     
-        } else { //ЕСЛИ ФАЙЛ ИСПОЛЬЗУЕТ УКАЗАТЕЛИ НА БЛОКИ
-            //err = check_data_blocks(fs, dirent->inode, &inode, private_data->b_blocks);
-            err = ext2fs_block_iterate(*fs, dirent->inode, BLOCK_FLAG_DATA_ONLY, NULL, test_block, private_data->b_blocks);
-            if (err) {
-                if(S_ISREG(inode.i_mode))
-                {
-                    printf("Ошибка проверки (не удалось проитерироваться) блоков данных inode %d - файла %s: %s\n", dirent->inode, dirent->name);
-                    return 0; 
-                }
-                if(S_ISDIR(inode.i_mode)){
-                    printf("Нарушение структуры каталогов, не удалось проитерироваться по блокам данных каталога %s\n", dirent->name);
-                    return 0;
-                }
-            }
         }
-
+    
     }
 
     if (S_ISDIR(inode.i_mode))
@@ -470,10 +470,10 @@ int test_block(ext2_filsys fs, blk_t *blocknr, int blockcnt, void *private) {
 
     int *not_found_blocks = (int *)private;
     errcode_t err;
-
     // Проверяем, отмечен ли используемый блок в карте блоков   
     if (!ext2fs_test_block_bitmap(fs->block_map, *blocknr)) {
         printf("Блок файла помеченный в карте блоков как неиспользуемый: %u\n", *blocknr);
+        error_with_celostnost = true;
         (*not_found_blocks)++;
     }
     return 0;
@@ -486,6 +486,7 @@ void close_fs(ext2_filsys* fs){
         exit(EXIT_FAILURE);
     }
 }
+
 
 int ext2fs_superblock_csum_my_verify(ext2_filsys fs, struct ext2_super_block* sb){ //1 в случае совпадения, 0 в случае несовпадения
     //return (fs->super->s_checksum == ext2fs_superblock_csum(fs, sb)); 
